@@ -1,3 +1,4 @@
+from flask_cors import CORS
 from flask import Flask, request, jsonify
 import os
 import json
@@ -5,7 +6,7 @@ import yt_dlp
 from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled
 
 app = Flask(__name__)
-
+CORS(app, resources={r"/transcripts": {"origins": "https://studio.botpress.cloud"}})
 def get_video_ids_from_playlist(playlist_url):
     ydl_opts = {'quiet': True, 'extract_flat': True, 'force_generic_extractor': True}
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
