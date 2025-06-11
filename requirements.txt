@@ -1,3 +1,4 @@
 Flask
 yt_dlp
 youtube-transcript-api
+flask-cors
