@@ -4,6 +4,9 @@ import os
 import json
 import yt_dlp
 from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled
+from flask import Flask, send_file, request
+import io
+import zipfile
 
 app = Flask(__name__)
 CORS(app, resources={r"/transcripts": {"origins": "https://studio.botpress.cloud"}})
