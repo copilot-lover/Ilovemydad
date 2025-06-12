@@ -7,19 +7,33 @@ from queue import Queue
 from flask import Flask, request, jsonify, send_file, Response
 from flask_cors import CORS
 import yt_dlp
+from pytube import Playlist
 from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled
 
 app = Flask(__name__)
 CORS(app)
 
-# In-memory job store: job_id → Queue of SSE messages
+# In-memory job store: job_id → Queue of SSE messages + zip_path attr
 jobs = {}
 
 def get_video_ids_from_playlist(playlist_url):
-    opts = {'quiet': True, 'extract_flat': True}
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(playlist_url, download=False)
-        return [e['id'] for e in info.get('entries', []) if 'id' in e]
+    # Primary method: yt_dlp
+    try:
+        opts = {'quiet': True, 'extract_flat': True}
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(playlist_url, download=False)
+            ids = [e['id'] for e in info.get('entries', []) if 'id' in e]
+        if ids:
+            return ids
+    except Exception:
+        pass
+
+    # Fallback: pytube
+    try:
+        pl = Playlist(playlist_url)
+        return [video.video_id for video in pl.videos]
+    except Exception:
+        return []
 
 def get_transcript(video_id):
     try:
@@ -27,32 +41,37 @@ def get_transcript(video_id):
         return "\n".join([x['text'] for x in trs])
     except TranscriptsDisabled:
         return "[No transcript available]"
-    except Exception:
-        return "[Error fetching transcript]"
+    except Exception as e:
+        return f"[Error fetching transcript: {e}]"
+
+def sse_event(progress, message):
+    # Server-Sent Event format
+    return f"data: {{\"progress\": {progress}, \"message\": \"{message}\"}}\n\n"
 
 def background_job(job_id, playlist_url):
     q = jobs[job_id]
-    q.put(jsonify_event(0, "Starting extraction"))
-    vids = get_video_ids_from_playlist(playlist_url)
-    total = len(vids)
-    q.put(jsonify_event(5, f"Found {total} videos"))
+    q.put(sse_event(0, "Job started"))
+    ids = get_video_ids_from_playlist(playlist_url)
+    total = len(ids)
+    if total == 0:
+        q.put(sse_event(100, "No videos found"))
+        q.put(None)
+        return
 
+    q.put(sse_event(5, f"Found {total} videos"))
     tempdir = tempfile.mkdtemp()
     zip_path = os.path.join(tempdir, f"{job_id}.zip")
+
     with zipfile.ZipFile(zip_path, 'w') as zf:
-        for idx, vid in enumerate(vids, 1):
-            q.put(jsonify_event(5 + idx * 90 // total, f"Processing {idx}/{total}"))
+        for idx, vid in enumerate(ids, start=1):
+            pct = 5 + idx * 90 // total
+            q.put(sse_event(pct, f"Processing {idx}/{total}"))
             text = get_transcript(vid)
             zf.writestr(f"{vid}.txt", text)
 
-    q.put(jsonify_event(100, "Complete"))
+    q.put(sse_event(100, "Complete"))
     jobs[job_id].zip_path = zip_path
-    q.put(None)  # sentinel to close the stream
-
-def jsonify_event(progress, message):
-    return f"data: {{" \
-           f"\"progress\": {progress}, \"message\": \"{message}\"" \
-           f"}}\n\n"
+    q.put(None)  # end of stream
 
 @app.route("/transcripts", methods=["POST"])
 def start_transcripts():
@@ -73,14 +92,14 @@ def status(job_id):
     if not q:
         return jsonify(error="Invalid job_id"), 404
 
-    def event_stream():
+    def stream():
         while True:
             evt = q.get()
             if evt is None:
                 break
             yield evt
 
-    return Response(event_stream(), mimetype="text/event-stream")
+    return Response(stream(), mimetype="text/event-stream")
 
 @app.route("/download/<job_id>")
 def download(job_id):
